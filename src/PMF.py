@@ -17,12 +17,21 @@ from sklearn.utils.estimator_checks import check_estimator
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 from sklearn.model_selection import GridSearchCV
+from datetime import datetime
 
 #step size i.e. learning rate
 lr = 0.001
 
+# read system args
+parser = argparse.ArgumentParser(description='manual to this script')
+parser.add_argument('--path', type=str, default = "./data.npz")
+parser.add_argument('--tune', type=int, default = 1)
+parser.add_argument('--max_iter', type=int, default = 100)
+parser.add_argument('--verbose', type=int, default = 1)
+args = parser.parse_args()
+
 # prepare dataset
-path = "../dataset/data.npz"
+path = args.path#"./data.npz"
 npzfile = np.load(path )
 dataAll = np.asarray([npzfile['user_id'].reshape(-1), npzfile['item_id'].reshape(-1),npzfile['rating'].reshape(-1)] )
 dataAll=dataAll.T
@@ -93,7 +102,7 @@ def PMF_train(rawData, maxIter=200, K=2,  lamU=0.1, lamV=0.1, useSparse=False ,v
             if(verbose):
                 print("Epoch {}: Train RMSE: {:.4f}".format(epoch, rmseTrain[epoch]))
     else:
-        #Running Time is Linear to observed rating
+        #Runing Time is Linear to observed rating
         rmseTrain = np.zeros(maxIter)
         for epoch in range(maxIter):
             Ut = U
@@ -135,7 +144,6 @@ class PMF(BaseEstimator,TransformerMixin):
         U, V, n_iter_, train_rmse_ = PMF_train(X, maxIter=self.maxIter, K=self.K, lamU=self.lamU, lamV=self.lamV)
 
         #parameters with trailing _ is used to check if the estimator has been fitted
-        #TODO: add validation rmse
         self.rmse_=  train_rmse_
         self.n_iter_ = n_iter_
         self.U = U
@@ -150,7 +158,7 @@ class PMF(BaseEstimator,TransformerMixin):
         #since build-in gridsearch pick params by "the bigger the better"
         return -rmse
 
-def GridSearchTunning(trainData, maxIter=100, verbose=0):
+def GridSearchTuning(trainData, maxIter=100, verbose=0):
     #Tune regularization hyper-params
     regu_params = {"lamU":[0.1,1,10,100],"lamV":[0.1,1,10,100]}
     pmfEst = PMF(K=2, maxIter=maxIter)
@@ -160,9 +168,12 @@ def GridSearchTunning(trainData, maxIter=100, verbose=0):
 
     bestLamU = gs.best_params_['lamU']
     bestLamV = gs.best_params_['lamV']
-    #Mean cross-validated score of the best_estimator
+    #Mean cross-validated score of the best_estimator. (refit on whole training set)
     bestScoreL = -gs.best_score_
-    print("Finish tunning lamda U and lamda V \r\n==> Best lamU {}, best lamV {}, RMSE={}".format(bestLamU, bestLamV,bestScoreL ))
+    print("\r\nFinish tuning lamda U and lamda V \r\n==> Best lamU: {}, best lamV: {},   Best RMSE={:.4f} ".format(bestLamU, bestLamV,bestScoreL ))
+    if(verbose):
+        print("Mean test RMSE over 5 fold CV for params (lamda U, lamda V):\r\n{}\r\n".format(-gs.cv_results_["mean_test_score"]))
+
 
     #Tune # latent features
     factors_params = {"K":[1,2,3,4,5]}
@@ -172,35 +183,52 @@ def GridSearchTunning(trainData, maxIter=100, verbose=0):
 
     bestK = gs2.best_params_['K']
     bestScoreK = -gs2.best_score_
-    print("Finish tunning factors K \r\n==> Best K={}, RMSE={}".format(bestK,bestScoreK ))
+    print("Finish tuning factors K \r\n==> Best K={}.   Best RMSE={:.4f}".format(bestK,bestScoreK ))
 
-    if(verbose==2):
-        print("CV details:{}\r\n{}".format(gs.cv_results_, gs2.cv_results_) )
+    if(verbose):
+        print("Mean test RMSE over 5 fold CV for params (lamda U, lamda V):\r\n{}".format(-gs2.cv_results_["mean_test_score"]))
 
     return bestLamU, bestLamV, bestK
 
 #experiment on a given train data and test data
-def Experiment(trainData, testData, verbose=0):
-    #Grid Search Tunning on training set
-    bestLamU, bestLamV, bestK = GridSearchTunning(trainData, maxIter=100, verbose=verbose)
+def Experiment(trainData, testData, maxIter=100, verbose=0, tune=1):
+    if(tune):
+        #Grid Search Tuning on training set
+        print("Start grid search CV for {} iterations".format(maxIter))
+        bestLamU, bestLamV, bestK = GridSearchTuning(trainData, maxIter=maxIter, verbose=verbose)
+    else:
+        # load tuning results
+        bestLamU = 0.1; bestLamV=0.1
+        if len(trainData) > len(testData):
+            bestK=2
+        else:
+            bestK=5
     #train with the full training set using the tuned best hyper-params
-    print("--- Training on whole training set with optimal hyperparams---")
-    U,V,_,rmse_train = PMF_train(trainData, maxIter=maxIter, K=bestK, lamU=bestLamU, lamV=bestLamV, verbose=verbose )
+    print("-- Training on whole training set with optimal hyperparams---")
+    print("Optimal hyper-params: lamda_U = {}, lamda_V={}, K={}".format(bestLamU, bestLamV, bestK))
+    startTime = datetime.now()
+    U,V,_,rmse_train = PMF_train(trainData, maxIter=maxIter, K=bestK, lamU=bestLamU, lamV=bestLamV, verbose=0 )
+    timeCost = datetime.now() - startTime
+    print("Finish training in {}s. \r\n=>RMSE on training set: {:.4f}".format(timeCost, rmse_train))
+
     #evaluate on test set
     rmse_test = PMF_test(testData, U,V)
+    print("==> RMSE on test set: {:.4f}".format(rmse_test))
 
     return rmse_test
 
 if __name__ == "__main__":
+
+
     trainData, testData = train_test_split(dataAll, test_size=0.2, random_state=0)
+
     # Dense training data
     print("\r\n----- Experiment on Dense Data -----")
-    rmse1 = Experiment(trainData, testData, verbose=1)
-    print("RMSE of test set on dense data: {:.4f}".format(rmse1))
+    rmse1 = Experiment(trainData, testData, maxIter=args.max_iter, verbose=args.verbose, tune=args.tune)
     # Sparse training data
+
     print("\r\n----- Experiment on Sparse Data -----")
-    rmse2 = Experiment(testData, trainData, verbose=1)
-    print("RMSE of test set on sparse data: {:.4f}".format(rmse2))
+    rmse2 = Experiment(testData, trainData, maxIter=args.max_iter, verbose=args.verbose, tune=args.tune)
 
 
 
